@@ -1,0 +1,27 @@
+http:
+  middlewares:
+    secure-headers:
+      headers:
+        stsSeconds: 31536000
+        contentTypeNosniff: true
+        referrerPolicy: strict-origin-when-cross-origin
+        customFrameOptionsValue: SAMEORIGIN
+        customResponseHeaders:
+          X-Powered-By: ""
+    compress:
+      compress: {}
+    ratelimit-public:
+      rateLimit:
+        average: 50
+        burst: 100
+        period: 1s
+    ratelimit-login:
+      rateLimit:
+        average: 10
+        burst: 30
+        period: 1s
+
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12

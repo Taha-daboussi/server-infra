@@ -1,0 +1,198 @@
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+discovery.docker "containers" {
+  host             = "tcp://socket-proxy:2375"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project", "__meta_docker_container_label_com_docker_compose_service"]
+    separator     = "-"
+    regex         = "(.+-.+)"
+    target_label  = "service_name"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "tcp://socket-proxy:2375"
+  targets       = discovery.relabel.containers.output
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { job = "docker" }
+  forward_to    = [loki.write.default.receiver]
+}
+
+local.file_match "traefik_access" {
+  path_targets = [{
+    __path__     = "/var/log/traefik/access.log",
+    job          = "traefik",
+    service_name = "traefik-access",
+  }]
+}
+
+loki.source.file "traefik_access" {
+  targets    = local.file_match.traefik_access.targets
+  forward_to = [loki.process.traefik_access.receiver]
+}
+
+loki.process "traefik_access" {
+  stage.json {
+    expressions = { router = "RouterName" }
+  }
+
+  stage.labels {
+    values = { router = "" }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "host" {
+  path          = "/var/log/journal"
+  max_age       = "12h"
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { job = "journal", service_name = "host" }
+  forward_to    = [loki.write.default.receiver]
+}
+
+faro.receiver "sheout" {
+  extra_log_labels = {
+    service_name = "sheout-storefront-browser",
+    kind         = "",
+  }
+
+  server {
+    listen_address       = "0.0.0.0"
+    listen_port          = 12347
+    cors_allowed_origins = string.split(sys.env("FARO_CORS_ORIGINS"), ",")
+  }
+
+  sourcemaps {
+    download = false
+  }
+
+  output {
+    logs   = [loki.write.default.receiver]
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+faro.receiver "meherb" {
+  extra_log_labels = {
+    service_name = "meherb-storefront-browser",
+    kind         = "",
+  }
+
+  server {
+    listen_address       = "0.0.0.0"
+    listen_port          = 12348
+    cors_allowed_origins = string.split(sys.env("MEHERB_FARO_CORS_ORIGINS"), ",")
+  }
+
+  sourcemaps {
+    download = false
+  }
+
+  output {
+    logs   = [loki.write.default.receiver]
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.receiver.otlp "apps" {
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces = [otelcol.processor.transform.fetch_spans.input]
+    logs   = [otelcol.exporter.otlphttp.loki.input]
+  }
+}
+
+otelcol.processor.transform "fetch_spans" {
+  error_mode = "ignore"
+
+  trace_statements {
+    context    = "span"
+    conditions = [`kind == SPAN_KIND_CLIENT and IsMatch(name, "^fetch ")`]
+    statements = [
+      `replace_pattern(name, "[?#].*$", "")`,
+      `replace_pattern(name, "/[a-z]+_[0-9A-Z]{26}", "/{id}")`,
+      `set(attributes["next.span_name"], name)`,
+      `replace_pattern(attributes["http.url"], "[?#].*$", "")`,
+      `set(attributes["url.path"], attributes["http.url"])`,
+      `replace_pattern(attributes["url.path"], "^[a-z]+://[^/]*", "")`,
+      `replace_pattern(attributes["url.path"], "/[a-z]+_[0-9A-Z]{26}", "/{id}")`,
+    ]
+  }
+
+  trace_statements {
+    context    = "span"
+    conditions = [`kind == SPAN_KIND_SERVER`]
+    statements = [
+      `replace_pattern(attributes["http.target"], "[?#].*$", "")`,
+    ]
+  }
+
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+otelcol.exporter.otlphttp "loki" {
+  client {
+    endpoint = "http://loki:3100/otlp"
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+
+    tls {
+      insecure = true
+    }
+  }
+}

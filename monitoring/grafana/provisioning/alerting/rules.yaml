@@ -1,0 +1,386 @@
+apiVersion: 1
+groups:
+- orgId: 1
+  name: host
+  folder: Alerts
+  interval: 1m
+  rules:
+  - uid: host-cpu
+    title: Host CPU above 90%
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: 100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])))
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 90
+    for: 15m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warning
+    annotations:
+      summary: CPU is {{ with $values.A }}{{ humanize .Value }}{{ end }}% for 15 minutes.
+  - uid: host-memory
+    title: Host memory above 90%
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 90
+    for: 10m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: Memory is {{ with $values.A }}{{ humanize .Value }}{{ end }}% used.
+  - uid: host-disk
+    title: Root disk above 85%
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: 100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 85
+    for: 5m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: Root disk is {{ with $values.A }}{{ humanize .Value }}{{ end }}% full. Run docker system df and check /srv/backups.
+  - uid: host-swap
+    title: Swap above 2 GiB
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: (node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes) / 1024 / 1024 / 1024
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 2
+    for: 15m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warning
+    annotations:
+      summary: Swap use is {{ with $values.A }}{{ humanize .Value }}{{ end }} GiB. Memory is too tight.
+- orgId: 1
+  name: containers-and-traffic
+  folder: Alerts
+  interval: 1m
+  rules:
+  - uid: target-down
+    title: Scrape target down
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: up
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 1
+    for: 3m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: '{{ $labels.job }} on {{ $labels.instance }} does not answer.'
+  - uid: container-restarts
+    title: Container restarts again and again
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: changes(container_start_time_seconds{name!=""}[15m])
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 2
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: '{{ $labels.name }} started {{ with $values.A }}{{ humanize .Value }}{{ end }} times in 15 minutes.'
+  - uid: container-oom
+    title: Container killed for memory
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: increase(container_oom_events_total{name!=""}[10m])
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: The kernel killed a process in {{ $labels.name }} because it reached its memory limit.
+  - uid: container-memory-limit
+    title: Container near its memory limit
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: 100 * max by (name) (container_memory_working_set_bytes{name!=""}) / max by (name) (container_spec_memory_limit_bytes{name!=""} > 0)
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 90
+    for: 10m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.name }} uses {{ with $values.A }}{{ humanize .Value }}{{ end }}% of its mem_limit.'
+  - uid: router-5xx
+    title: Too many 5xx answers
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: 100 * sum by (router) (rate(traefik_router_requests_total{code=~"5.."}[5m])) / (sum by (router) (rate(traefik_router_requests_total[5m])) > 0.05)
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 5
+    for: 5m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: '{{ $labels.router }} answers {{ with $values.A }}{{ humanize .Value }}{{ end }}% of requests with 5xx.'
+  - uid: cert-expiry
+    title: TLS certificate expires soon
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: min by (cn) (traefik_tls_certs_not_after - time()) / 86400
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 14
+    for: 1h
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: The certificate for {{ $labels.cn }} expires in {{ with $values.A }}{{ humanize .Value }}{{ end }} days. Traefik renews at 30 days, so renewal fails.
+  - uid: deploy-failed
+    title: Deploy failed
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 86400
+        to: 0
+      datasourceUid: loki
+      model:
+        refId: A
+        expr: sum(count_over_time({job="journal"} |~ "deploy of [0-9a-f]{40} failed" [10m]))
+        instant: true
+        queryType: instant
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: A deploy failed. Read the deploy logs in the Server overview dashboard.
+  - uid: backup-failed
+    title: Backup failed
+    condition: B
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 86400
+        to: 0
+      datasourceUid: loki
+      model:
+        refId: A
+        expr: 'sum(count_over_time({job="journal"} |~ "^(postgres|data) .*: FAILED$" [1d]))'
+        instant: true
+        queryType: instant
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: critical
+    annotations:
+      summary: The nightly backup had a failure. Run journalctl -u infra-backup.

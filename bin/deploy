@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app="${1:?usage: deploy <app> (sha from SSH_ORIGINAL_COMMAND or \$2)}"
+sha="${SSH_ORIGINAL_COMMAND:-${2:-}}"
+
+[[ "$app" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "bad app name: $app" >&2; exit 2; }
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha: '$sha' (need a full 40 char commit sha)" >&2; exit 2; }
+
+app_dir="/srv/apps/$app"
+repo="$app_dir/repo"
+compose_file="$repo/deploy/compose.yml"
+[[ -d "$repo/.git" ]] || { echo "no repo at $repo" >&2; exit 2; }
+[[ -f "$app_dir/.env" ]] || { echo "no env file at $app_dir/.env" >&2; exit 2; }
+cd "$app_dir"
+
+log() { echo "[$app] $*"; logger -t deploy "[$app] $*"; }
+
+exec 9>"$app_dir/.deploy.lock"
+flock -w 900 9 || { log "another deploy holds the lock for 15 minutes, giving up"; exit 1; }
+
+compose() {
+  IMAGE_TAG="$1" APP_DIR="$app_dir" COMPOSE_BAKE=false COMPOSE_PARALLEL_LIMIT=1 \
+    docker compose --project-name "$app" --project-directory "$repo/deploy" \
+    -f "$compose_file" --env-file "$app_dir/.env" "${@:2}"
+}
+
+checkout() {
+  git -C "$repo" checkout --quiet --detach --force "$1"
+  git -C "$repo" clean -ffdxq
+}
+
+prev=""
+if [[ -f "$app_dir/.deployed" ]]; then prev="$(<"$app_dir/.deployed")"; fi
+started=$SECONDS
+
+log "deploy $sha (previous: ${prev:-none})"
+git -C "$repo" fetch --quiet origin main
+git -C "$repo" merge-base --is-ancestor "$sha" origin/main \
+  || { log "$sha is not on origin/main, refusing"; exit 1; }
+
+checkout "$sha"
+
+if compose "$sha" build && compose "$sha" up -d --wait --wait-timeout 300 --remove-orphans; then
+  echo "$sha" > "$app_dir/.deployed"
+  log "deployed $sha in $((SECONDS - started))s"
+else
+  log "deploy of $sha failed"
+  compose "$sha" ps -a >&2
+  compose "$sha" logs --tail 80 >&2
+  if [[ -n "$prev" ]]; then
+    log "rolling back to $prev"
+    checkout "$prev"
+    compose "$prev" up -d --wait --wait-timeout 300 --remove-orphans \
+      && log "rolled back to $prev" \
+      || log "ROLLBACK TO $prev FAILED, the app may be down"
+  fi
+  exit 1
+fi
+
+if [[ -d "$repo/deploy/dashboards" ]]; then
+  rm -rf "/srv/grafana/dashboards/$app"
+  mkdir -p "/srv/grafana/dashboards/$app"
+  find -L "$repo/deploy/dashboards" -maxdepth 1 -name '*.json' -exec cp -L {} "/srv/grafana/dashboards/$app/" \;
+fi
+
+docker image ls --format '{{.Repository}} {{.Tag}}' \
+  | awk -v app="$app" -v keep1="$sha" -v keep2="${prev:-$sha}" \
+      'index($1, app "-") == 1 && length($2) == 40 && $2 ~ /^[0-9a-f]+$/ && $2 != keep1 && $2 != keep2 { print $1 ":" $2 }' \
+  | xargs -r docker image rm
+docker image prune -f >/dev/null
+docker builder prune -f --max-used-space 6gb >/dev/null
+log "cleanup done"

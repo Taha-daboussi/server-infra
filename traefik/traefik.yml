@@ -1,0 +1,71 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+  aliasHeadersStrategy: delete
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json
+  bufferingSize: 100
+  fields:
+    defaultMode: keep
+    names:
+      StartLocal: drop
+    headers:
+      defaultMode: drop
+      names:
+        User-Agent: keep
+
+api:
+  dashboard: true
+  insecure: true
+
+ping: {}
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+    http3: {}
+    http:
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - secure-headers@file
+        - compress@file
+  metrics:
+    address: ":8082"
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+
+providers:
+  docker:
+    endpoint: tcp://socket-proxy:2375
+    exposedByDefault: false
+    network: edge
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      storage: /acme/acme.json
+      tlsChallenge: {}

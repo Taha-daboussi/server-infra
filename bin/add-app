@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app="${1:?usage: sudo add-app <app> <owner/repo>}"
+repo="${2:?usage: sudo add-app <app> <owner/repo>}"
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+[[ "$app" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "bad app name: $app" >&2; exit 2; }
+[[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "bad repo: $repo" >&2; exit 2; }
+
+dir="/srv/apps/$app"
+ssh_dir=/home/deploy/.ssh
+as_deploy() { sudo -u deploy -H "$@"; }
+
+install -d -o deploy -g deploy -m 750 "$dir" "$dir/data"
+install -d -o deploy -g deploy -m 700 "$dir/secrets"
+
+if ! grep -qs '^github.com ' "$ssh_dir/known_hosts"; then
+  curl -fsS https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' \
+    | as_deploy tee -a "$ssh_dir/known_hosts" >/dev/null
+fi
+
+read_key="$ssh_dir/github-$app"
+[[ -f "$read_key" ]] || as_deploy ssh-keygen -q -t ed25519 -N "" -C "server-read-$app" -f "$read_key"
+if ! grep -qs "^Host github-$app\$" "$ssh_dir/config"; then
+  printf 'Host github-%s\n  HostName github.com\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n\n' "$app" "$read_key" \
+    | as_deploy tee -a "$ssh_dir/config" >/dev/null
+fi
+
+gha_key="$ssh_dir/gha-$app"
+[[ -f "$gha_key" ]] || as_deploy ssh-keygen -q -t ed25519 -N "" -C "gha-deploy-$app" -f "$gha_key"
+line="restrict,command=\"/srv/infra/bin/deploy $app\" $(cat "$gha_key.pub")"
+grep -qsF "$line" "$ssh_dir/authorized_keys" || echo "$line" | as_deploy tee -a "$ssh_dir/authorized_keys" >/dev/null
+chmod 600 "$ssh_dir/authorized_keys" "$ssh_dir/config"
+
+if [[ -d "$dir/repo/.git" ]]; then
+  echo "$app: repo already cloned at $dir/repo"
+elif as_deploy git ls-remote "git@github-$app:$repo.git" HEAD >/dev/null 2>&1; then
+  as_deploy git clone --quiet "git@github-$app:$repo.git" "$dir/repo"
+  echo "$app: cloned $repo into $dir/repo"
+else
+  echo "$app: add this read-only deploy key to $repo, then run add-app again:"
+  echo "  gh repo deploy-key add - --repo $repo --title server-read <<< '$(cat "$read_key.pub")'"
+  exit 3
+fi
+
+[[ -f "$dir/.env" ]] || { install -o deploy -g deploy -m 600 /dev/null "$dir/.env"; echo "$app: created an empty $dir/.env"; }
+echo "$app: ready. GitHub Actions key: $gha_key (copy it into the DEPLOY_SSH_KEY secret, never print it)"

@@ -1,0 +1,48 @@
+name: traefik
+
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      EVENTS: 1
+      INFO: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    mem_limit: 64m
+    networks: [socket]
+
+  traefik:
+    image: traefik:v3.7.19
+    restart: unless-stopped
+    depends_on: [socket-proxy]
+    ports:
+      - 80:80
+      - 443:443/tcp
+      - 443:443/udp
+      - 127.0.0.1:8080:8080
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./acme:/acme
+      - /var/log/traefik:/var/log/traefik
+    mem_limit: 256m
+    networks:
+      edge:
+        ipv4_address: 172.30.0.10
+      socket: {}
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+networks:
+  edge:
+    external: true
+  socket:
+    name: socket
+    internal: true

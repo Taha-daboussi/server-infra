@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up app databases and data folders to /srv/backups
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/infra/bin/backup
+Nice=10
+IOSchedulingClass=idle

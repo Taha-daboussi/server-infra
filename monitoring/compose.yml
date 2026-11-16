@@ -1,0 +1,167 @@
+name: monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=4GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    mem_limit: 768m
+    networks: [monitoring, edge]
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=172.31.0.1:9100
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/containerd/.+)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    mem_limit: 128m
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+      - --disable_metrics=percpu,sched,tcp,udp,hugetlb,referenced_memory,cpu_topology,resctrl,advtcp,memory_numa,process,disk
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    mem_limit: 256m
+    networks: [monitoring]
+
+  loki:
+    image: grafana/loki:3.7.10
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki:/loki
+    mem_limit: 768m
+    networks: [monitoring]
+
+  tempo:
+    image: grafana/tempo:3.1.1
+    restart: unless-stopped
+    command: ["-target=all", "-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo:/var/tempo
+    mem_limit: 512m
+    networks: [monitoring]
+
+  alloy:
+    image: grafana/alloy:v1.22.0
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    environment:
+      FARO_CORS_ORIGINS: ${FARO_CORS_ORIGINS:?}
+      MEHERB_FARO_CORS_ORIGINS: ${MEHERB_FARO_CORS_ORIGINS:?}
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy:/var/lib/alloy/data
+      - /var/log/traefik:/var/log/traefik:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    mem_limit: 512m
+    depends_on: [loki, tempo]
+    networks: [monitoring, edge, socket]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.faro.rule: Host(`${TELEMETRY_DOMAIN:?}`) && PathPrefix(`/collect`)
+      traefik.http.routers.faro.entrypoints: websecure
+      traefik.http.routers.faro.middlewares: ratelimit-public@file
+      traefik.http.routers.faro.service: faro
+      traefik.http.services.faro.loadbalancer.server.port: "12347"
+      traefik.http.routers.faro-meherb.rule: Host(`${TELEMETRY_DOMAIN}`) && PathPrefix(`/meherb/collect`)
+      traefik.http.routers.faro-meherb.entrypoints: websecure
+      traefik.http.routers.faro-meherb.middlewares: faro-meherb-strip,ratelimit-public@file
+      traefik.http.routers.faro-meherb.service: faro-meherb
+      traefik.http.middlewares.faro-meherb-strip.stripprefix.prefixes: /meherb
+      traefik.http.services.faro-meherb.loadbalancer.server.port: "12348"
+
+  grafana:
+    image: grafana/grafana:13.2.6
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:?}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_LOG_LEVEL: warn
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards/server:ro
+      - /srv/grafana/dashboards:/etc/grafana/dashboards/apps:ro
+      - grafana:/var/lib/grafana
+    mem_limit: 512m
+    depends_on: [prometheus, loki, tempo]
+    networks: [monitoring, edge]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.grafana.rule: Host(`${GRAFANA_DOMAIN}`)
+      traefik.http.routers.grafana.entrypoints: websecure
+      traefik.http.routers.grafana.middlewares: ratelimit-login@file
+      traefik.http.services.grafana.loadbalancer.server.port: "3000"
+
+secrets:
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
+
+volumes:
+  prometheus:
+  loki:
+  tempo:
+  alloy:
+  grafana:
+
+networks:
+  monitoring:
+    name: monitoring
+    driver_opts:
+      com.docker.network.bridge.name: br-mon
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          gateway: 172.31.0.1
+  edge:
+    external: true
+  socket:
+    external: true

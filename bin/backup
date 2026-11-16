@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+dest="/srv/backups/$(date -u +%F)"
+keep_days=7
+mkdir -p "$dest"
+chmod 700 /srv/backups "$dest"
+
+log() { echo "$*"; logger -t backup "$*"; }
+failed=0
+
+while read -r id db; do
+  name="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}-{{index .Config.Labels "com.docker.compose.service"}}' "$id")"
+  user="$(docker exec "$id" printenv POSTGRES_USER)"
+  out="$dest/$name-$db.dump"
+  if docker exec "$id" pg_dump -U "$user" -d "$db" -Fc > "$out.tmp"; then
+    mv "$out.tmp" "$out"
+    log "postgres $name/$db: $(du -h "$out" | cut -f1)"
+  else
+    rm -f "$out.tmp"
+    log "postgres $name/$db: FAILED"
+    failed=1
+  fi
+done < <(docker ps --filter label=infra.backup.postgres --format '{{.ID}} {{.Label "infra.backup.postgres"}}')
+
+for data in /srv/apps/*/data; do
+  [[ -d "$data" ]] || continue
+  app="$(basename "$(dirname "$data")")"
+  out="$dest/$app-data.tar.zst"
+  if tar --zstd -cf "$out.tmp" -C "$data" .; then
+    mv "$out.tmp" "$out"
+    log "data $app: $(du -h "$out" | cut -f1)"
+  else
+    rm -f "$out.tmp"
+    log "data $app: FAILED"
+    failed=1
+  fi
+done
+
+find /srv/backups -mindepth 1 -maxdepth 1 -type d -mtime +"$keep_days" -exec rm -rf {} +
+log "backup done in $dest, total $(du -sh /srv/backups | cut -f1)"
+exit "$failed"

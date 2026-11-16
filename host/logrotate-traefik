@@ -1,0 +1,13 @@
+/var/log/traefik/*.log {
+  daily
+  rotate 14
+  maxsize 100M
+  missingok
+  notifempty
+  compress
+  delaycompress
+  dateext
+  postrotate
+    docker kill --signal=USR1 traefik-traefik-1 >/dev/null
+  endscript
+}
